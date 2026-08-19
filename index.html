@@ -166,6 +166,14 @@
   .foot-meta{font-family:var(--mono);font-size:10.5px;color:var(--ink-soft)}
   .foot-acts{display:flex;gap:8px;flex-wrap:wrap}
 
+  .trimpanel{display:none;margin-top:20px;padding:16px 18px;background:#fff;border:1px solid var(--rule);border-radius:3px}
+  .trimpanel.on{display:block}
+  .trimpanel h4{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-soft);font-weight:700;margin-bottom:12px}
+  .trimrow{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
+  .trimrow input[type=date]{font-family:var(--mono);font-size:13px;padding:7px 9px;border:1px solid var(--rule);border-radius:3px;background:var(--paper);color:var(--ink)}
+  .trimstat{margin-top:13px;padding-top:12px;border-top:1px solid var(--rule-soft);font-size:13px;color:var(--ink-soft);line-height:1.6}
+  .trimstat b{font-family:var(--mono);color:var(--ink);font-weight:600}
+  .trimstat .kill{color:var(--oxblood)}
   .toast{position:fixed;bottom:74px;left:50%;transform:translateX(-50%) translateY(14px);background:var(--ink);color:var(--paper);padding:9px 16px;border-radius:3px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .18s,transform .18s;z-index:50}
   .toast.up{opacity:1;transform:translateX(-50%) translateY(0)}
 
@@ -270,12 +278,24 @@
     <div>Pending charges change when they post, so a row you mark now can reappear later with a different amount.</div>
   </div>
 
+  <div class="trimpanel" id="trimpanel">
+    <h4>Keep only this date range</h4>
+    <div class="trimrow">
+      <div class="field"><label for="tFrom">From</label><input type="date" id="tFrom"></div>
+      <div class="field"><label for="tTo">To</label><input type="date" id="tTo"></div>
+      <button class="btn" id="tGo">Trim memory</button>
+      <button class="btn ghost" id="tCancel">Cancel</button>
+    </div>
+    <div class="trimstat" id="tStat"></div>
+  </div>
+
   <div class="foot">
     <span class="foot-meta" id="footmeta"></span>
     <div class="foot-acts">
       <button class="btn ghost tiny" id="undo" disabled>Undo last</button>
       <button class="btn ghost tiny" id="backup">Back up</button>
       <button class="btn ghost tiny" id="restore">Restore</button>
+      <button class="btn ghost tiny" id="trimBtn">Trim by date</button>
       <input type="file" id="restoreFile" accept=".json,application/json" style="display:none">
       <button class="btn ghost tiny" id="forget">Forget categories</button>
       <button class="btn ghost tiny" id="reset">Clear memory</button>
@@ -300,7 +320,7 @@
 (function(){
 "use strict";
 var K_SEEN='bluedot:accounted',K_UNDO='bluedot:lastbatch',K_MAP='bluedot:colmap',K_CAT='bluedot:categories';
-var seen=new Set(),lastBatch=[],savedMap=null,catMap={},memOnly=false;
+var seen=new Set(),undoRec=null,savedMap=null,catMap={},memOnly=false;
 var rows=[],headers=[],parsed=null,cursor=0,mode='one',total=0;
 var $=function(i){return document.getElementById(i);};
 var mem={};
@@ -508,9 +528,9 @@ function dockStat(){
 async function accountFor(list){
   var f=list.map(function(t){return t.fp;});
   f.forEach(function(x){seen.add(x);});
-  lastBatch=f;
+  undoRec={op:'mark',keys:f};
   await sSet(K_SEEN,JSON.stringify(Array.from(seen)));
-  await sSet(K_UNDO,JSON.stringify(f));
+  await sSet(K_UNDO,JSON.stringify(undoRec));
   tally();
 }
 async function rememberCat(merchant,cat){
@@ -532,7 +552,9 @@ function tally(){
   $('tally').innerHTML='<b>'+seen.size.toLocaleString()+'</b> accounted for'+(memOnly?' &nbsp;\u00b7&nbsp; not saved':'');
   $('footmeta').textContent=memOnly?'Browser storage is blocked here. Marks last this session only.'
     :seen.size.toLocaleString()+' transactions remembered \u00b7 '+allCats().length+' tables learned';
-  $('undo').disabled=!lastBatch.length;
+  var hasUndo=undoRec&&undoRec.keys&&undoRec.keys.length;
+  $('undo').disabled=!hasUndo;
+  $('undo').textContent=(hasUndo&&undoRec.op==='trim')?'Undo trim':'Undo last';
 }
 function copyText(txt,msg){
   if(navigator.clipboard&&navigator.clipboard.writeText){
@@ -613,10 +635,14 @@ $('markSel').addEventListener('click',async function(){
 });
 
 $('undo').addEventListener('click',async function(){
-  if(!lastBatch.length)return;var n=lastBatch.length;
-  lastBatch.forEach(function(f){seen.delete(f);});lastBatch=[];
-  await sSet(K_SEEN,JSON.stringify(Array.from(seen)));await sSet(K_UNDO,'[]');
-  tally();if(parsed)build();toast(n+' put back');
+  if(!undoRec||!undoRec.keys||!undoRec.keys.length)return;
+  var n=undoRec.keys.length,was=undoRec.op;
+  if(was==='trim'){undoRec.keys.forEach(function(f){seen.add(f);});}
+  else{undoRec.keys.forEach(function(f){seen.delete(f);});}
+  undoRec=null;
+  await sSet(K_SEEN,JSON.stringify(Array.from(seen)));await sSet(K_UNDO,'null');
+  tally();if(parsed)build();
+  toast(was==='trim'?(n+' records restored'):(n+' put back'));
 });
 $('backup').addEventListener('click',function(){
   var payload={app:'blue-dot',version:1,exported:new Date().toISOString(),
@@ -647,20 +673,67 @@ $('restoreFile').addEventListener('change',function(e){
   r.readAsText(f);
   e.target.value='';
 });
+function fpDate(f){var d=String(f).split('|')[0];return /^\d{4}-\d{2}-\d{2}$/.test(d)?d:null;}
+function trimSplit(){
+  var a=$('tFrom').value,b=$('tTo').value,keep=[],kill=[],odd=[];
+  seen.forEach(function(f){
+    var d=fpDate(f);
+    if(!d){odd.push(f);return;}
+    if((!a||d>=a)&&(!b||d<=b))keep.push(f);else kill.push(f);
+  });
+  return {keep:keep,kill:kill,odd:odd};
+}
+function trimPreview(){
+  var r=trimSplit();
+  $('tStat').innerHTML='Keeps <b>'+r.keep.length.toLocaleString()+'</b> record'+(r.keep.length===1?'':'s')+
+    ', permanently removes <b class="kill">'+r.kill.length.toLocaleString()+'</b>.'+
+    (r.odd.length?'<br>'+r.odd.length+' record'+(r.odd.length===1?'':'s')+' with an unreadable date will be kept.':'')+
+    '<br>Anything removed comes back as unaccounted on your next import.';
+  $('tGo').disabled=!r.kill.length;
+}
+$('trimBtn').addEventListener('click',function(){
+  var p=$('trimpanel');
+  if(p.classList.contains('on')){p.classList.remove('on');return;}
+  if(!$('tFrom').value){
+    var n=new Date();
+    $('tFrom').value=n.getFullYear()+'-'+pad(n.getMonth()+1)+'-01';
+    $('tTo').value=n.getFullYear()+'-'+pad(n.getMonth()+1)+'-'+pad(n.getDate());
+  }
+  p.classList.add('on');trimPreview();
+});
+$('tCancel').addEventListener('click',function(){$('trimpanel').classList.remove('on');});
+$('tFrom').addEventListener('change',trimPreview);
+$('tTo').addEventListener('change',trimPreview);
+$('tGo').addEventListener('click',async function(){
+  var r=trimSplit();
+  if(!r.kill.length)return;
+  if(!confirm('Permanently remove '+r.kill.length+' record'+(r.kill.length===1?'':'s')+' outside '+
+    ($('tFrom').value||'the beginning')+' to '+($('tTo').value||'now')+'?\n\n'+
+    r.keep.length+' will be kept. Undo trim will put them back until you do something else.'))return;
+  seen=new Set(r.keep.concat(r.odd));
+  undoRec={op:'trim',keys:r.kill};
+  await sSet(K_SEEN,JSON.stringify(Array.from(seen)));
+  await sSet(K_UNDO,JSON.stringify(undoRec));
+  tally();if(parsed)build();
+  $('trimpanel').classList.remove('on');
+  toast('Removed '+r.kill.length+' records');
+});
 $('forget').addEventListener('click',async function(){
   if(!confirm('Forget all learned table assignments? Transaction history stays.'))return;
   catMap={};await sSet(K_CAT,'{}');tally();if(parsed)build();toast('Table memory cleared');
 });
 $('reset').addEventListener('click',async function(){
   if(!confirm('Forget all '+seen.size+' accounted transactions? Everything will come back as new.'))return;
-  seen=new Set();lastBatch=[];await sSet(K_SEEN,'[]');await sSet(K_UNDO,'[]');
+  seen=new Set();undoRec=null;await sSet(K_SEEN,'[]');await sSet(K_UNDO,'null');
   tally();if(parsed){cursor=0;build();}toast('Memory cleared');
 });
 
 (async function(){
   if(!hasStore())memOnly=true;
   var s=await sGet(K_SEEN);if(s){try{JSON.parse(s).forEach(function(f){seen.add(f);});}catch(e){}}
-  var u=await sGet(K_UNDO);if(u){try{lastBatch=JSON.parse(u)||[];}catch(e){}}
+  var u=await sGet(K_UNDO);if(u){try{var pu=JSON.parse(u);
+    if(Array.isArray(pu))undoRec=pu.length?{op:'mark',keys:pu}:null;
+    else if(pu&&pu.keys)undoRec=pu;}catch(e){}}
   var m=await sGet(K_MAP);if(m){try{savedMap=JSON.parse(m);}catch(e){}}
   var c=await sGet(K_CAT);if(c){try{catMap=JSON.parse(c)||{};}catch(e){}}
   refreshCatList();tally();
