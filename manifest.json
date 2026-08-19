@@ -1,0 +1,15 @@
+{
+  "name": "Blue Dot",
+  "short_name": "Blue Dot",
+  "description": "Reconciliation worklist for bank transactions",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#F8F9F5",
+  "theme_color": "#232A26",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
