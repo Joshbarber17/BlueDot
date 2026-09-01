@@ -166,6 +166,10 @@
   .foot-meta{font-family:var(--mono);font-size:10.5px;color:var(--ink-soft)}
   .foot-acts{display:flex;gap:8px;flex-wrap:wrap}
 
+  .repost{display:none;padding:11px 22px;background:#FDF3E7;border-bottom:1px solid #E8D5B5;font-size:12.5px;color:#6B4A18;line-height:1.5}
+  .repost.on{display:block}
+  .repost b{font-weight:700}
+  .flag{display:inline-block;width:7px;height:7px;border-radius:50%;background:#B87A2E;margin-left:6px;vertical-align:middle}
   .trimpanel{display:none;margin-top:20px;padding:16px 18px;background:#fff;border:1px solid var(--rule);border-radius:3px}
   .trimpanel.on{display:block}
   .trimpanel h4{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-soft);font-weight:700;margin-bottom:12px}
@@ -215,6 +219,8 @@
       <div class="field"><label for="mDesc">Description</label><select id="mDesc"></select></div>
       <div class="field"><label for="mAmt">Amount</label><select id="mAmt"></select></div>
       <div class="field"><label for="mCred">Credits (if separate)</label><select id="mCred"></select></div>
+      <div class="field"><label for="mId">Transaction ID (best)</label><select id="mId"></select></div>
+      <div class="field"><label for="mStat">Status column</label><select id="mStat"></select></div>
       <div class="checkline">
         <input type="checkbox" id="skipPending" checked>
         <label for="skipPending" style="font-size:12.5px;letter-spacing:0;text-transform:none;color:var(--ink-soft);font-weight:400">Skip pending</label>
@@ -235,6 +241,7 @@
       <div class="left"><span class="dot"></span><span id="left">0 to go</span></div>
       <span class="pos" id="pos"></span>
     </div>
+    <div class="repost" id="repost"></div>
     <div class="focus-body">
       <div class="f-merchant grab" id="fMerchant" title="Click to copy"></div>
       <div class="f-amt grab" id="fAmt" title="Click to copy"></div>
@@ -430,38 +437,96 @@ function loadText(text,name){
   var gD=guess(headers,[/^(post(ing)?\s*)?date$/i,/date/i]),
       gS=guess(headers,[/^(description|merchant|payee|memo|name)$/i,/descr|merch|payee|memo|detail/i]),
       gA=guess(headers,[/^amount$/i,/amount/i,/^debit$/i,/debit|withdraw/i]),
-      gC=guess(headers,[/^credit$/i,/credit|deposit/i]);
+      gC=guess(headers,[/^credit$/i,/credit|deposit/i]),
+      gI=guess(headers,[/^(transaction\s*)?id$/i,/^ref(erence)?(\s*(no|num|number|#))?$/i,/transaction\s*(id|number|ref)/i,/confirmation/i]),
+      gT=guess(headers,[/^status$/i,/status|posted|pending|cleared/i]);
   if(gC===gA)gC=-1;
+  if(gI===gA||gI===gD||gI===gS)gI=-1;
+  if(gT===gA||gT===gD||gT===gS)gT=-1;
   if(gD<0)gD=0;if(gS<0)gS=Math.min(1,headers.length-1);if(gA<0)gA=headers.length-1;
-  if(savedMap&&savedMap.headers===headers.join('|')){gD=savedMap.d;gS=savedMap.s;gA=savedMap.a;gC=savedMap.c;}
+  if(savedMap&&savedMap.headers===headers.join('|')){gD=savedMap.d;gS=savedMap.s;gA=savedMap.a;gC=savedMap.c;
+    if(savedMap.i!==undefined)gI=savedMap.i; if(savedMap.t!==undefined)gT=savedMap.t;}
   fillSel($('mDate'),headers,gD,false);fillSel($('mDesc'),headers,gS,false);
   fillSel($('mAmt'),headers,gA,false);fillSel($('mCred'),headers,gC,true);
+  fillSel($('mId'),headers,gI,true);fillSel($('mStat'),headers,gT,true);
   $('filename').textContent=name+'  \u00b7  '+parsed.length+' rows';
+  window.__fname=name;
   $('strip').classList.add('on');$('modes').classList.add('on');
   cursor=0;build();
 }
 
+function isPending(r,ti){
+  if(ti>=0){var v=String(r[ti]==null?'':r[ti]).toLowerCase();
+    return /pend|auth|hold|process|unposted/.test(v);}
+  return /pend|auth hold|\bhold\b/.test(r.join(' ').toLowerCase());
+}
 function build(){
-  var di=+$('mDate').value,si=+$('mDesc').value,ai=+$('mAmt').value,ci=+$('mCred').value;
-  var skip=$('skipPending').checked,occ={},all=[];
+  var di=+$('mDate').value,si=+$('mDesc').value,ai=+$('mAmt').value,ci=+$('mCred').value,
+      ii=+$('mId').value,ti=+$('mStat').value;
+  var skip=$('skipPending').checked,occ={},all=[],pendCount=0;
   parsed.forEach(function(r){
-    if(skip&&r.join(' ').toLowerCase().indexOf('pending')>-1)return;
+    var pend=isPending(r,ti);
+    if(pend)pendCount++;
+    if(skip&&pend)return;
     var iso=normDate(r[di]),raw=String(r[si]==null?'':r[si]).trim(),amt=normAmt(r[ai]);
     if(ci>=0){var cr=normAmt(r[ci]);
       if(cr!==null&&cr!==0)amt=Math.abs(cr);else if(amt!==null)amt=-Math.abs(amt);}
     if(amt===null)return;
-    var base=iso+'|'+amt.toFixed(2)+'|'+raw.toLowerCase().slice(0,40);
-    occ[base]=(occ[base]||0)+1;
-    all.push({iso:iso,raw:raw,merchant:cleanMerchant(raw),amt:amt,fp:fp(iso,amt,raw,occ[base]-1)});
+    var key;
+    if(ii>=0&&String(r[ii]||'').trim()){ key='id:'+String(r[ii]).trim(); }
+    else{
+      var base=iso+'|'+amt.toFixed(2)+'|'+raw.toLowerCase().slice(0,40);
+      occ[base]=(occ[base]||0)+1;
+      key=fp(iso,amt,raw,occ[base]-1);
+    }
+    all.push({iso:iso,raw:raw,merchant:cleanMerchant(raw),amt:amt,fp:key,pending:pend});
   });
+  window.__pend=pendCount;
   total=all.length;
+  nearIdx=null;
   rows=all.filter(function(t){return !seen.has(t.fp);});
   rows.sort(function(a,b){return a.iso<b.iso?-1:a.iso>b.iso?1:0;});
   if(cursor>=rows.length)cursor=0;
+  $('filename').textContent=(window.__fname||'')+'  \u00b7  '+parsed.length+' rows'+
+    (window.__pend?'  \u00b7  '+window.__pend+' pending detected':'  \u00b7  no pending detected');
   $('note').style.display=$('skipPending').checked?'none':'flex';
   render();
 }
 
+function dayDiff(a,b){
+  var pa=String(a).split('-'),pb=String(b).split('-');
+  if(pa.length<3||pb.length<3)return 999;
+  return Math.round((Date.UTC(+pb[0],+pb[1]-1,+pb[2])-Date.UTC(+pa[0],+pa[1]-1,+pa[2]))/86400000);
+}
+var nearIdx=null;
+function buildNearIdx(){
+  nearIdx={};
+  seen.forEach(function(f){
+    if(f.indexOf('id:')===0)return;
+    var p=String(f).split('|');
+    if(p.length<3)return;
+    var d=p[0],a=parseFloat(p[1]),sdesc=p[2]||'';
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(d)||isNaN(a))return;
+    var k=sdesc.replace(/[^a-z0-9]/g,'').slice(0,10);
+    if(!k)return;
+    (nearIdx[k]=nearIdx[k]||[]).push({d:d,a:a});
+  });
+}
+function nearMatch(t){
+  if(!nearIdx)buildNearIdx();
+  var k=String(t.raw).toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,10);
+  var list=nearIdx[k];if(!list)return null;
+  var best=null;
+  for(var i=0;i<list.length;i++){
+    var c=list[i],dd=Math.abs(dayDiff(c.d,t.iso));
+    if(dd>6)continue;
+    if(c.a>0!==t.amt>0)continue;
+    var lo=Math.min(Math.abs(c.a),Math.abs(t.amt)),hi=Math.max(Math.abs(c.a),Math.abs(t.amt));
+    if(hi>0&&lo/hi<0.55)continue;
+    if(!best||dd<best.dd)best={dd:dd,d:c.d,a:c.a};
+  }
+  return best;
+}
 function render(){
   if(!rows.length){
     $('focus').classList.remove('on');$('ledger').classList.remove('on');
@@ -485,6 +550,13 @@ function renderOne(){
   $('pos').textContent=(cursor+1)+' / '+rows.length;
   $('progbar').style.width=((cursor)/rows.length*100)+'%';
   $('mBack').style.display=cursor>0?'inline-block':'none';
+  var nm=nearMatch(t),rp=$('repost');
+  if(nm){
+    rp.classList.add('on');
+    rp.innerHTML='Looks like something you already accounted for on <b>'+showDate(nm.d)+'</b> for <b>'+money(nm.a)+'</b>.'+
+      (Math.abs(nm.a-t.amt)>0.005?' The amount changed, which usually means it was pending then and has now posted.':' Same amount, different date or description.')+
+      '<br>If you already entered it, press Accounted for to retire this version too. Do not enter it twice.';
+  } else rp.classList.remove('on');
   var hit=lookupCat(t.merchant);
   $('catInput').value=hit?hit.cat:'';
   $('catHint').innerHTML=hit
@@ -507,6 +579,8 @@ function renderList(){
       '<td class="c-cat"></td>'+
       '<td class="c-amt '+(t.amt<0?'neg':'pos')+'">'+money(t.amt)+'</td>';
     tr.querySelector('.merchant').textContent=t.merchant;
+    if(nearMatch(t)){var fl=document.createElement('span');fl.className='flag';
+      fl.title='Similar to one already accounted for';tr.querySelector('.merchant').appendChild(fl);}
     tr.querySelector('.c-cat').textContent=hit?hit.cat:'';
     tb.appendChild(tr);
   });
@@ -580,9 +654,9 @@ $('intake').addEventListener('drop',function(e){
   var f=e.dataTransfer.files[0];if(!f)return;
   var r=new FileReader();r.onload=function(){loadText(String(r.result),f.name);};r.readAsText(f);
 });
-['mDate','mDesc','mAmt','mCred'].forEach(function(id){
+['mDate','mDesc','mAmt','mCred','mId','mStat'].forEach(function(id){
   $(id).addEventListener('change',function(){
-    savedMap={headers:headers.join('|'),d:+$('mDate').value,s:+$('mDesc').value,a:+$('mAmt').value,c:+$('mCred').value};
+    savedMap={headers:headers.join('|'),d:+$('mDate').value,s:+$('mDesc').value,a:+$('mAmt').value,c:+$('mCred').value,i:+$('mId').value,t:+$('mStat').value};
     sSet(K_MAP,JSON.stringify(savedMap));cursor=0;build();
   });
 });
