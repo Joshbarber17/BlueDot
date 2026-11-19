@@ -170,6 +170,7 @@
   .repost.on{display:block}
   .repost b{font-weight:700}
   .flag{display:inline-block;width:7px;height:7px;border-radius:50%;background:#B87A2E;margin-left:6px;vertical-align:middle}
+  .ptag{display:inline-block;font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-soft);border:1px solid var(--rule);border-radius:2px;padding:1px 5px;margin-left:8px;vertical-align:middle}
   .trimpanel{display:none;margin-top:20px;padding:16px 18px;background:#fff;border:1px solid var(--rule);border-radius:3px}
   .trimpanel.on{display:block}
   .trimpanel h4{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-soft);font-weight:700;margin-bottom:12px}
@@ -219,7 +220,8 @@
       <div class="field"><label for="mDesc">Description</label><select id="mDesc"></select></div>
       <div class="field"><label for="mAmt">Amount</label><select id="mAmt"></select></div>
       <div class="field"><label for="mCred">Credits (if separate)</label><select id="mCred"></select></div>
-      <div class="field"><label for="mId">Transaction ID (best)</label><select id="mId"></select></div>
+      <div class="field"><label for="mBal">Balance column (stable key)</label><select id="mBal"></select></div>
+      <div class="field"><label for="mId">Transaction ID (if any)</label><select id="mId"></select></div>
       <div class="field"><label for="mStat">Status column</label><select id="mStat"></select></div>
       <div class="checkline">
         <input type="checkbox" id="skipPending" checked>
@@ -238,7 +240,7 @@
   <div class="focus" id="focus">
     <div class="prog"><i id="progbar" style="width:0%"></i></div>
     <div class="focus-top">
-      <div class="left"><span class="dot"></span><span id="left">0 to go</span></div>
+      <div class="left"><span class="dot"></span><span id="left">0 to go</span><span class="ptag" id="ptag" style="display:none" title="Bank still shows this as pending, but the amount is locked and it will match when it posts">pending</span></div>
       <span class="pos" id="pos"></span>
     </div>
     <div class="repost" id="repost"></div>
@@ -326,8 +328,8 @@
 <script>
 (function(){
 "use strict";
-var K_SEEN='bluedot:accounted',K_UNDO='bluedot:lastbatch',K_MAP='bluedot:colmap',K_CAT='bluedot:categories';
-var seen=new Set(),undoRec=null,savedMap=null,catMap={},memOnly=false;
+var K_SEEN='bluedot:accounted',K_UNDO='bluedot:lastbatch',K_MAP='bluedot:colmap',K_CAT='bluedot:categories',K_META='bluedot:meta';
+var seen=new Set(),undoRec=null,savedMap=null,catMap={},meta={},memOnly=false;
 var rows=[],headers=[],parsed=null,cursor=0,mode='one',total=0;
 var $=function(i){return document.getElementById(i);};
 var mem={};
@@ -378,15 +380,29 @@ function normAmt(v){
 function money(n){return (n<0?'\u2212':'+')+'$'+Math.abs(n).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,',');}
 function plain(n){return n.toFixed(2);}
 
+/* AFCU-style prefixes: "VISA - 11/12 MERCHANT ..." and "11/13 - MERCHANT" */
+function stripBankPrefix(s){
+  return String(s||'').replace(/^visa\s*-\s*\d{1,2}\/\d{1,2}\s*/i,'')
+    .replace(/^\d{1,2}\/\d{1,2}\s*-\s*/,'').trim();
+}
+function wasPendingStyle(s){
+  return /^(visa\s*-\s*\d{1,2}\/\d{1,2}|\d{1,2}\/\d{1,2}\s*-)/i.test(String(s||'').trim());
+}
+function firstWord(s){
+  var m=stripBankPrefix(s).toLowerCase().match(/[a-z0-9]+/);
+  return m?m[0]:'';
+}
 function cleanMerchant(raw){
-  var s=String(raw||'').trim();
+  var s=stripBankPrefix(String(raw||'').trim());
+  s=s.replace(/\s+\d{4,}\s*$/,'');
+  if(/^(amazon\.com|amzn\.com|amazon)\b/i.test(s)||/amzn\.com\/bill/i.test(s))return 'Amazon';
   s=s.replace(/^(POS |PIN |SIG |DEBIT CARD |CREDIT CARD |CHECK CARD |VISA )*(PURCHASE|WITHDRAWAL|DEBIT|CREDIT|PAYMENT)\s*[-\u2013\u2014:]*\s*/i,'');
   s=s.replace(/^(ACH|EFT|POS|ATM|WEB|PPD|CCD|TEL|IAT)\s+(DEBIT|CREDIT|PMT|PAYMENT|WITHDRAWAL|DEPOSIT)?\s*[-\u2013\u2014:]*\s*/i,'');
   s=s.replace(/^(EXTERNAL |ONLINE |MOBILE |RECURRING )*(TRANSFER|DEPOSIT|WITHDRAWAL)\s*(TO|FROM)?\s*[-\u2013\u2014:]*\s*/i,'');
   s=s.replace(/^(SQ|TST|SP|PY|PYPL|PAYPAL|IC|EB|WL|TOAST|LEVELUP)\s*\*\s*/i,'');
   s=s.replace(/\s+\d{2}\/\d{2}(\/\d{2,4})?\s*$/,'');
   s=s.replace(/\s*#?\d{5,}\s*/g,' ');
-  s=s.replace(/\s+[A-Za-z][A-Za-z .'\-]{2,}\s+[A-Z]{2}\s*$/,'');
+  s=s.replace(/\s+[A-Za-z][A-Za-z.'\-]*\s+[A-Z]{2}\s*$/,'');
   s=s.replace(/\s+[A-Z]{2}\s*$/,'');
   s=s.replace(/[\s\-\u2013\u2014*]+$/,'').replace(/\s{2,}/g,' ').trim();
   if(s&&s===s.toUpperCase()){
@@ -439,56 +455,69 @@ function loadText(text,name){
       gA=guess(headers,[/^amount$/i,/amount/i,/^debit$/i,/debit|withdraw/i]),
       gC=guess(headers,[/^credit$/i,/credit|deposit/i]),
       gI=guess(headers,[/^(transaction\s*)?id$/i,/^ref(erence)?(\s*(no|num|number|#))?$/i,/transaction\s*(id|number|ref)/i,/confirmation/i]),
-      gT=guess(headers,[/^status$/i,/status|posted|pending|cleared/i]);
+      gT=guess(headers,[/^status$/i,/status|posted|pending|cleared/i]),
+      gB=guess(headers,[/^(running\s*)?balance$/i,/balance/i]);
   if(gC===gA)gC=-1;
+  if(gB===gA||gB===gC||gB===gD||gB===gS)gB=-1;
   if(gI===gA||gI===gD||gI===gS)gI=-1;
   if(gT===gA||gT===gD||gT===gS)gT=-1;
   if(gD<0)gD=0;if(gS<0)gS=Math.min(1,headers.length-1);if(gA<0)gA=headers.length-1;
   if(savedMap&&savedMap.headers===headers.join('|')){gD=savedMap.d;gS=savedMap.s;gA=savedMap.a;gC=savedMap.c;
-    if(savedMap.i!==undefined)gI=savedMap.i; if(savedMap.t!==undefined)gT=savedMap.t;}
+    if(savedMap.i!==undefined)gI=savedMap.i; if(savedMap.t!==undefined)gT=savedMap.t;
+    if(savedMap.b!==undefined)gB=savedMap.b;}
   fillSel($('mDate'),headers,gD,false);fillSel($('mDesc'),headers,gS,false);
   fillSel($('mAmt'),headers,gA,false);fillSel($('mCred'),headers,gC,true);
-  fillSel($('mId'),headers,gI,true);fillSel($('mStat'),headers,gT,true);
+  fillSel($('mId'),headers,gI,true);fillSel($('mStat'),headers,gT,true);fillSel($('mBal'),headers,gB,true);
   $('filename').textContent=name+'  \u00b7  '+parsed.length+' rows';
   window.__fname=name;
   $('strip').classList.add('on');$('modes').classList.add('on');
   cursor=0;build();
 }
 
-function isPending(r,ti){
+function statusPending(r,ti){
   if(ti>=0){var v=String(r[ti]==null?'':r[ti]).toLowerCase();
     return /pend|auth|hold|process|unposted/.test(v);}
   return /pend|auth hold|\bhold\b/.test(r.join(' ').toLowerCase());
 }
+/* Anything the bank calls pending stays hidden, full stop. A row with no
+   running balance is treated the same way. The balance key still does its
+   job once the row posts, so nothing hidden here can come back twice. */
+function isUnsettled(r,ti,bi){
+  if(statusPending(r,ti))return true;
+  if(bi>=0&&String(r[bi]==null?'':r[bi]).trim()==='')return true;
+  return false;
+}
 function build(){
   var di=+$('mDate').value,si=+$('mDesc').value,ai=+$('mAmt').value,ci=+$('mCred').value,
-      ii=+$('mId').value,ti=+$('mStat').value;
+      ii=+$('mId').value,ti=+$('mStat').value,bi=+$('mBal').value;
   var skip=$('skipPending').checked,occ={},all=[],pendCount=0;
   parsed.forEach(function(r){
-    var pend=isPending(r,ti);
-    if(pend)pendCount++;
-    if(skip&&pend)return;
+    var unsettled=isUnsettled(r,ti,bi);
+    if(unsettled)pendCount++;
+    if(skip&&unsettled)return;
     var iso=normDate(r[di]),raw=String(r[si]==null?'':r[si]).trim(),amt=normAmt(r[ai]);
     if(ci>=0){var cr=normAmt(r[ci]);
       if(cr!==null&&cr!==0)amt=Math.abs(cr);else if(amt!==null)amt=-Math.abs(amt);}
     if(amt===null)return;
-    var key;
+    /* legacy fingerprint is always computed so history marked under the old
+       scheme keeps matching after this upgrade */
+    var base=iso+'|'+amt.toFixed(2)+'|'+raw.toLowerCase().slice(0,40);
+    occ[base]=(occ[base]||0)+1;
+    var legacy=fp(iso,amt,raw,occ[base]-1),key=legacy;
+    var bal=bi>=0?String(r[bi]==null?'':r[bi]).trim().replace(/[$,\s]/g,''):'';
     if(ii>=0&&String(r[ii]||'').trim()){ key='id:'+String(r[ii]).trim(); }
-    else{
-      var base=iso+'|'+amt.toFixed(2)+'|'+raw.toLowerCase().slice(0,40);
-      occ[base]=(occ[base]||0)+1;
-      key=fp(iso,amt,raw,occ[base]-1);
-    }
-    all.push({iso:iso,raw:raw,merchant:cleanMerchant(raw),amt:amt,fp:key,pending:pend});
+    else if(bal){ key='bal:'+amt.toFixed(2)+'|'+bal; }
+    all.push({iso:iso,raw:raw,merchant:cleanMerchant(raw),amt:amt,fp:key,alt:legacy,
+      pending:unsettled,pendTag:statusPending(r,ti)});
   });
   window.__pend=pendCount;
   total=all.length;
   nearIdx=null;
-  rows=all.filter(function(t){return !seen.has(t.fp);});
+  rows=all.filter(function(t){return !seen.has(t.fp)&&!seen.has(t.alt);});
   rows.sort(function(a,b){return a.iso<b.iso?-1:a.iso>b.iso?1:0;});
   if(cursor>=rows.length)cursor=0;
   $('filename').textContent=(window.__fname||'')+'  \u00b7  '+parsed.length+' rows'+
-    (window.__pend?'  \u00b7  '+window.__pend+' pending detected':'  \u00b7  no pending detected');
+    (window.__pend?'  \u00b7  '+window.__pend+' unsettled'+($('skipPending').checked?' skipped':' shown'):'  \u00b7  nothing unsettled');
   $('note').style.display=$('skipPending').checked?'none':'flex';
   render();
 }
@@ -499,31 +528,43 @@ function dayDiff(a,b){
   return Math.round((Date.UTC(+pb[0],+pb[1]-1,+pb[2])-Date.UTC(+pa[0],+pa[1]-1,+pa[2]))/86400000);
 }
 var nearIdx=null;
+/* Index of everything accounted for that still carries a date and a description:
+   legacy fingerprints parse directly, balance/id keys read their saved metadata. */
 function buildNearIdx(){
-  nearIdx={};
+  nearIdx=[];
   seen.forEach(function(f){
-    if(f.indexOf('id:')===0)return;
-    var p=String(f).split('|');
-    if(p.length<3)return;
-    var d=p[0],a=parseFloat(p[1]),sdesc=p[2]||'';
-    if(!/^\d{4}-\d{2}-\d{2}$/.test(d)||isNaN(a))return;
-    var k=sdesc.replace(/[^a-z0-9]/g,'').slice(0,10);
-    if(!k)return;
-    (nearIdx[k]=nearIdx[k]||[]).push({d:d,a:a});
+    var d=null,a=NaN,desc='';
+    if(f.indexOf('bal:')===0){
+      var q=f.slice(4).split('|');a=parseFloat(q[0]);
+      var mm=meta[f];if(!mm)return;d=mm.d;desc=mm.r||'';
+    } else if(f.indexOf('id:')===0){
+      var mi=meta[f];if(!mi)return;d=mi.d;desc=mi.r||'';a=NaN;
+    } else {
+      var p=String(f).split('|');if(p.length<3)return;
+      d=p[0];a=parseFloat(p[1]);desc=p[2]||'';
+    }
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(String(d)))return;
+    nearIdx.push({d:d,a:a,desc:desc,pend:wasPendingStyle(desc),w:firstWord(desc)});
   });
 }
 function nearMatch(t){
   if(!nearIdx)buildNearIdx();
-  var k=String(t.raw).toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,10);
-  var list=nearIdx[k];if(!list)return null;
-  var best=null;
-  for(var i=0;i<list.length;i++){
-    var c=list[i],dd=Math.abs(dayDiff(c.d,t.iso));
+  var w=firstWord(t.raw),best=null;
+  for(var i=0;i<nearIdx.length;i++){
+    var c=nearIdx[i],dd=Math.abs(dayDiff(c.d,t.iso));
     if(dd>6)continue;
-    if(c.a>0!==t.amt>0)continue;
-    var lo=Math.min(Math.abs(c.a),Math.abs(t.amt)),hi=Math.max(Math.abs(c.a),Math.abs(t.amt));
-    if(hi>0&&lo/hi<0.55)continue;
-    if(!best||dd<best.dd)best={dd:dd,d:c.d,a:c.a};
+    if(!isNaN(c.a)&&(c.a>0)!==(t.amt>0))continue;
+    if(!c.pend)continue;
+    var hit=false;
+    /* a settled charge arriving under its rewritten name: amount identical, within a few days */
+    if(!isNaN(c.a)&&Math.abs(c.a-t.amt)<0.005&&dd<=3)hit=true;
+    /* same merchant word, amount in the same neighbourhood (tips, holds) */
+    if(!hit&&w.length>=4&&c.w.length>=4&&(w.indexOf(c.w)===0||c.w.indexOf(w)===0)){
+      if(isNaN(c.a))hit=true;
+      else{var lo=Math.min(Math.abs(c.a),Math.abs(t.amt)),hi=Math.max(Math.abs(c.a),Math.abs(t.amt));
+        if(hi===0||lo/hi>=0.55)hit=true;}
+    }
+    if(hit&&(!best||dd<best.dd))best={dd:dd,d:c.d,a:isNaN(c.a)?t.amt:c.a};
   }
   return best;
 }
@@ -547,6 +588,7 @@ function renderOne(){
   $('fDate').textContent=longDate(t.iso);
   $('fRaw').textContent=t.raw;
   $('left').textContent=rows.length+' to go';
+  $('ptag').style.display=t.pendTag?'inline-block':'none';
   $('pos').textContent=(cursor+1)+' / '+rows.length;
   $('progbar').style.width=((cursor)/rows.length*100)+'%';
   $('mBack').style.display=cursor>0?'inline-block':'none';
@@ -554,7 +596,7 @@ function renderOne(){
   if(nm){
     rp.classList.add('on');
     rp.innerHTML='Looks like something you already accounted for on <b>'+showDate(nm.d)+'</b> for <b>'+money(nm.a)+'</b>.'+
-      (Math.abs(nm.a-t.amt)>0.005?' The amount changed, which usually means it was pending then and has now posted.':' Same amount, different date or description.')+
+      (Math.abs(nm.a-t.amt)>0.005?' The amount changed, which usually means it was pending then and has now posted.':' Same amount. The bank most likely renamed it when it posted.')+
       '<br>If you already entered it, press Accounted for to retire this version too. Do not enter it twice.';
   } else rp.classList.remove('on');
   var hit=lookupCat(t.merchant);
@@ -579,6 +621,7 @@ function renderList(){
       '<td class="c-cat"></td>'+
       '<td class="c-amt '+(t.amt<0?'neg':'pos')+'">'+money(t.amt)+'</td>';
     tr.querySelector('.merchant').textContent=t.merchant;
+    if(t.pendTag){var pt=document.createElement('span');pt.className='ptag';pt.textContent='pending';tr.querySelector('.merchant').appendChild(pt);}
     if(nearMatch(t)){var fl=document.createElement('span');fl.className='flag';
       fl.title='Similar to one already accounted for';tr.querySelector('.merchant').appendChild(fl);}
     tr.querySelector('.c-cat').textContent=hit?hit.cat:'';
@@ -601,7 +644,10 @@ function dockStat(){
 
 async function accountFor(list){
   var f=list.map(function(t){return t.fp;});
-  f.forEach(function(x){seen.add(x);});
+  var touched=false;
+  list.forEach(function(t){seen.add(t.fp);
+    if(t.fp.indexOf('|')<0||t.fp.indexOf('bal:')===0||t.fp.indexOf('id:')===0){meta[t.fp]={d:t.iso,r:String(t.raw||'').toLowerCase().slice(0,40)};touched=true;}});
+  if(touched)await sSet(K_META,JSON.stringify(meta));
   undoRec={op:'mark',keys:f};
   await sSet(K_SEEN,JSON.stringify(Array.from(seen)));
   await sSet(K_UNDO,JSON.stringify(undoRec));
@@ -654,9 +700,9 @@ $('intake').addEventListener('drop',function(e){
   var f=e.dataTransfer.files[0];if(!f)return;
   var r=new FileReader();r.onload=function(){loadText(String(r.result),f.name);};r.readAsText(f);
 });
-['mDate','mDesc','mAmt','mCred','mId','mStat'].forEach(function(id){
+['mDate','mDesc','mAmt','mCred','mId','mStat','mBal'].forEach(function(id){
   $(id).addEventListener('change',function(){
-    savedMap={headers:headers.join('|'),d:+$('mDate').value,s:+$('mDesc').value,a:+$('mAmt').value,c:+$('mCred').value,i:+$('mId').value,t:+$('mStat').value};
+    savedMap={headers:headers.join('|'),d:+$('mDate').value,s:+$('mDesc').value,a:+$('mAmt').value,c:+$('mCred').value,i:+$('mId').value,t:+$('mStat').value,b:+$('mBal').value};
     sSet(K_MAP,JSON.stringify(savedMap));cursor=0;build();
   });
 });
@@ -720,7 +766,7 @@ $('undo').addEventListener('click',async function(){
 });
 $('backup').addEventListener('click',function(){
   var payload={app:'blue-dot',version:1,exported:new Date().toISOString(),
-    accounted:Array.from(seen),categories:catMap};
+    accounted:Array.from(seen),categories:catMap,meta:meta};
   var b=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}),a=document.createElement('a');
   a.href=URL.createObjectURL(b);a.download='blue-dot-backup-'+new Date().toISOString().slice(0,10)+'.json';
   document.body.appendChild(a);a.click();document.body.removeChild(a);
@@ -736,6 +782,8 @@ $('restoreFile').addEventListener('change',function(e){
     if(!d||d.app!=='blue-dot'||!Array.isArray(d.accounted)){toast('That file is not a Blue Dot backup');return;}
     var before=seen.size;
     d.accounted.forEach(function(x){seen.add(x);});
+    if(d.meta&&typeof d.meta==='object'){for(var mk in d.meta){if(!meta[mk])meta[mk]=d.meta[mk];}
+      await sSet(K_META,JSON.stringify(meta));}
     if(d.categories&&typeof d.categories==='object'){
       for(var k in d.categories){if(!catMap[k])catMap[k]=d.categories[k];}
     }
@@ -747,7 +795,12 @@ $('restoreFile').addEventListener('change',function(e){
   r.readAsText(f);
   e.target.value='';
 });
-function fpDate(f){var d=String(f).split('|')[0];return /^\d{4}-\d{2}-\d{2}$/.test(d)?d:null;}
+function fpDate(f){
+  f=String(f);var d;
+  if(f.indexOf('bal:')===0||f.indexOf('id:')===0){d=meta[f]&&meta[f].d;}
+  else d=f.split('|')[0];
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(d))?d:null;
+}
 function trimSplit(){
   var a=$('tFrom').value,b=$('tTo').value,keep=[],kill=[],odd=[];
   seen.forEach(function(f){
@@ -798,7 +851,7 @@ $('forget').addEventListener('click',async function(){
 });
 $('reset').addEventListener('click',async function(){
   if(!confirm('Forget all '+seen.size+' accounted transactions? Everything will come back as new.'))return;
-  seen=new Set();undoRec=null;await sSet(K_SEEN,'[]');await sSet(K_UNDO,'null');
+  seen=new Set();undoRec=null;meta={};await sSet(K_SEEN,'[]');await sSet(K_UNDO,'null');await sSet(K_META,'{}');
   tally();if(parsed){cursor=0;build();}toast('Memory cleared');
 });
 
@@ -810,6 +863,7 @@ $('reset').addEventListener('click',async function(){
     else if(pu&&pu.keys)undoRec=pu;}catch(e){}}
   var m=await sGet(K_MAP);if(m){try{savedMap=JSON.parse(m);}catch(e){}}
   var c=await sGet(K_CAT);if(c){try{catMap=JSON.parse(c)||{};}catch(e){}}
+  var mt=await sGet(K_META);if(mt){try{meta=JSON.parse(mt)||{};}catch(e){}}
   refreshCatList();tally();
 })();
 })();
