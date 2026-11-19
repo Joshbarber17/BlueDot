@@ -1,4 +1,4 @@
-[README.md](https://github.com/user-attachments/files/31235989/README.md)
+[README.md](https://github.com/user-attachments/files/35100502/README.md)
 # Blue Dot
 
 A reconciliation worklist for people who keep their budget in a spreadsheet.
@@ -11,23 +11,36 @@ Blue Dot puts that state back, on your side, where it should have been all along
 It never talks to a bank. You feed it the CSV you already download, and it tells
 you what you haven't accounted for yet.
 
+## How it recognises a transaction
+
+Keys are chosen in this order, per row:
+
+1. **Transaction ID column**, when the export has one.
+2. **Amount + running balance.** This is the one that matters for America
+   First. A card charge shows up first as `VISA - 11/12 EXXON REBEL#815 OCOEE
+   FL 012015` and is rewritten to `ExxonMobil` when it settles. The date,
+   amount and balance stay identical through that rewrite, and amount + balance
+   is unique across every row in the export, so it is the stable identity.
+3. **Date + amount + description + occurrence index**, for exports with no
+   balance column. The occurrence index keeps two identical $4.50 coffees on the
+   same day from collapsing into one.
+
+History recorded under the older date-based scheme keeps matching after an
+upgrade; both keys are checked on every import.
+
+### Pending rows
+
+Anything the bank marks Pending is hidden. So is any row with no running
+balance. A restaurant tab can change amount between pending and posted, so a
+pending row is never something to enter in a spreadsheet, and it is never shown
+here. It appears for the first time once it posts, under its final name and
+amount, and the balance key keeps it from ever appearing again after that.
+
 ## Why it survives portal redesigns
 
 The old dot was read-state stored at the bank. This computes the same thing
 locally by fingerprinting each transaction, so no amount of redesigning on their
 end can take it away.
-
-Each row gets a fingerprint made of:
-
-    posting date | signed amount | first 40 chars of raw description | occurrence index
-
-The occurrence index is what keeps two identical $4.50 coffees on the same day
-from collapsing into one entry. Naive deduplication silently eats the second one,
-which is worse than having no indicator at all.
-
-The fingerprint uses the **raw** bank description, not the cleaned-up merchant
-name shown on screen. That way improving the display logic never invalidates
-history you've already marked.
 
 Practical upshot: re-import the same date range as often as you want. Overlap
 costs nothing. Only genuinely new transactions surface.
